@@ -1,0 +1,8 @@
+[package]
+org = "orgniluka0617newruntime"
+name = "asgardeocallChoreo Userpayload"
+version = "0.1.0"
+distribution = "2201.3.5"
+
+[build-options]
+observabilityIncluded = true
