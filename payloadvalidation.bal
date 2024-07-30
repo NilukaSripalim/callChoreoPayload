@@ -19,7 +19,7 @@ type UserRequest record {
 };
 
 service / on new http:Listener(8090) {
-    resource function post risk(@http:Payload UserRequest req) returns UserRequest|error? {
+    resource function post userpayload(@http:Payload UserRequest req) returns UserRequest|error? {
         // Log the received request payload for debugging purposes
         log:printInfo("Received payload: " + req.toJsonString());
 
