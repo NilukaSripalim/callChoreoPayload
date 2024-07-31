@@ -26,8 +26,6 @@ service / on new http:Listener(8090) {
 
        // Log the received JSON payload (optional for debugging purposes)
        log:printInfo("Received JSON Payload: " + jsonString);
-       log:printInfo(jsonObj.);
-
 
        json|error jsonObj = value:fromJsonString(jsonString);
        if (jsonObj is error) {
