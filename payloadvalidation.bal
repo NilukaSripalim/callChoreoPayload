@@ -26,13 +26,13 @@ service / on new http:Listener(8090) {
 
        // Log the received JSON payload (optional for debugging purposes)
        log:printInfo("Received JSON Payload: " + jsonString);
+       log:printInfo(jsonObj.);
 
-       // Prepare the response with the same JSON payload
-       http:Response response = new;
-       response.statusCode = http:STATUS_CREATED; // Set status code to 201 Created
-       response.setJsonPayload(jsonObj);
-       
-       // Send the response back to the client
-       check caller->respond(response);
+
+       json|error jsonObj = value:fromJsonString(jsonString);
+       if (jsonObj is error) {
+        log:printError("Error occurred while parsing the JSON payload: " + jsonObj.message());
+       return;
+    }
    }
 }
