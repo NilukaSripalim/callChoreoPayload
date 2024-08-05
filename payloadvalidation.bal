@@ -3,7 +3,7 @@ import ballerina/log;
 
 configurable string asgardeoUrl = ?;
 configurable OAuth2App asgardeoAppConfig = ?;
-final string asgardeoScopesString = string:'join(" ", ASGARDEO_USER_VIEW_SCOPE);
+final string asgardeoScopesString = string:'join(" ", "internal_user_mgt_create");
 
 type OAuth2App record {|
     string clientId;
