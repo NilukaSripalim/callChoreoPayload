@@ -59,39 +59,36 @@ isolated function getAsgardeoUser(string id) returns AsgardeoUser|error {
     };
 }
 
-# Changes the password of the user in the Asgardeo user store. Uses Asgardeo SCIM 2.0 API.  
-# Update User PATCH Endpoint - https://wso2.com/asgardeo/docs/apis/scim2/#/operations/patchUser
+# Creates a new user in the Asgardeo user store. Uses Asgardeo SCIM 2.0 API.  
+# Create User POST Endpoint - https://wso2.com/asgardeo/docs/apis/scim2/#/operations/createUser
 #
 # + user - Asgardeo User data
-# + password - New password
-# + return - `()` if the password was changed successfully, else an `error`
-isolated function changePasswordOfUser(AsgardeoUser user, string password) returns error? {
-    http:Response response = check asgardeoClient->/scim2/Users/[user.id].patch({
+# + return - `()` if the user was created successfully, else an `error`
+isolated function createUser(AsgardeoUser user) returns error? {
+    json userPayload = {
         "schemas": [
-            "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+            "urn:ietf:params:scim:api:messages:2.0:User"
         ],
-        "Operations": [
+        "userName": user.userName,
+        "name": {
+            "givenName": user.name.givenName,
+            "familyName": user.name.familyName
+        },
+        "password": user.password,
+        "emails": [
             {
-                "op": "replace",
-                "value": {
-                    "password": password
-                }
-            },
-            {
-                "op": "replace",
-                "value": {
-                    "urn:scim:wso2:schema": {
-                        "is_migrated": "true"
-                    }
-                }
+                "value": user.email.value,
+                "primary": user.email.primary
             }
         ]
-    });
+    };
 
-    if response.statusCode != http:STATUS_OK {
+    http:Response response = check asgardeoClient->/scim2/Users.post(userPayload);
+
+    if response.statusCode != http:STATUS_CREATED {
         json|error jsonPayload = response.getJsonPayload();
-        log:printError(string `Error while changing password. ${jsonPayload is json ?
+        log:printError(string `Error while creating user. ${jsonPayload is json ?
             jsonPayload.toString() : response.statusCode}`);
-        return error("Error while changing password.");
+        return error("Error while creating user.");
     }
 }
