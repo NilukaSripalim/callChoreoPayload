@@ -1,33 +1,6 @@
 import ballerina/http;
 import ballerina/log;
 
-configurable string asgardeoUrl = ?;
-configurable OAuth2App asgardeoAppConfig = ?;
-
-type OAuth2App record {|
-    string clientId;
-    string clientSecret;
-    string tokenEndpoint;
-|};
-
-final string asgardeoScopesString = "internal_user_mgt_create";
-
-@display {
-    label: "Asgardeo Client",
-    id: "asgardeo/client"
-}
-final http:Client asgardeoClient = check new (asgardeoUrl, {
-    auth: {
-        scheme: http:OAUTH2,
-        config: {
-            tokenUrl: asgardeoAppConfig.tokenEndpoint,
-            clientId: asgardeoAppConfig.clientId,
-            clientSecret: asgardeoAppConfig.clientSecret,
-            scopes: [asgardeoScopesString]
-        }
-    }
-});
-
 type Email record {
     string value;
     boolean primary;
@@ -45,75 +18,12 @@ type UserRequest record {
     string correlationID;
 };
 
-type AsgardeoUser record {|
-    string id;
-    string userName;
-    boolean isMigrated;
-|};
-
-# Creates a user in the Asgardeo user store. Uses Asgardeo SCIM 2.0 API.
-# Create User - https://wso2.com/asgardeo/docs/apis/scim2/#/operations/createUser
-#
-# + user - User data to be created
-# + return - Created Asgardeo user data if successful, else an `error`
-isolated function createAsgardeoUser(record {|
-    string userName;
-    string givenName;
-    string familyName;
-    string email;
-    string password;
-|} user) returns AsgardeoUser|error {
-    http:Response response = check asgardeoClient->/scim2/Users.post({
-        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
-        "userName": user.userName,
-        "name": {
-            "givenName": user.givenName,
-            "familyName": user.familyName
-        },
-        "emails": [
-            {
-                "value": user.email,
-                "primary": true
-            }
-        ],
-        "password": user.password
-    });
-
-    if response.statusCode != http:STATUS_CREATED {
-        json|error jsonPayload = response.getJsonPayload();
-        log:printError(string `Error while creating user. ${jsonPayload is json ? jsonPayload.toString() : response.statusCode}`);
-        return error("Error while creating user.");
-    }
-
-    json jsonResponse = check response.getJsonPayload();
-    return {
-        id: jsonResponse.id.toString(),
-        userName: jsonResponse.userName.toString(),
-        isMigrated: jsonResponse.urn\:scim\:wso2\:schema.is_migrated.toString().toLowerAscii() == "true"
-    };
-}
-
 service / on new http:Listener(8090) {
     resource function post create(@http:Payload UserRequest req) returns UserRequest|error? {
         // Log the received request payload for debugging purposes
         log:printInfo("Received payload: " + req.toJsonString());
 
-        // Create a new user in Asgardeo
-        var userCreationResult = createAsgardeoUser({
-            userName: req.userName,
-            givenName: req.name.givenName,
-            familyName: req.name.familyName,
-            email: req.email.value,
-            password: "YourPassword123!" // You might want to handle password securely
-        });
-
-        if userCreationResult is AsgardeoUser {
-            log:printInfo("User created successfully: " + userCreationResult.toString());
-            // Simply return the received request payload as the response
-            return req;
-        } else {
-            log:printError("Failed to create user: ", userCreationResult);
-            return userCreationResult;
-        }
+        // Simply return the received request payload as the response
+        return req;
     }
 }
