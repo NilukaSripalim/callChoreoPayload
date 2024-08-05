@@ -1,9 +1,10 @@
 import ballerina/http;
+import ballerina/lang.regexp;
 import ballerina/log;
 
 configurable string asgardeoUrl = ?;
 configurable OAuth2App asgardeoAppConfig = ?;
-final string asgardeoScopesString = string:'join(" ", "internal_user_mgt_create");
+final string asgardeoScopesString = "internal_user_mgt_create";
 
 type OAuth2App record {|
     string clientId;
@@ -11,74 +12,86 @@ type OAuth2App record {|
     string tokenEndpoint;
 |};
 
-type UserName record {|
-    string givenName;
-    string familyName;
-|};
-
-type Email record {|
-    string value;
-    boolean primary;
-|};
-
-type AsgardeoUser record {|
-    string userName;
-    UserName name;
-    string password;
-    Email email;
-|};
-
+@display {
+    label: "Asgardeo Client",
+    id: "asgardeo/client"
+}
 final http:Client asgardeoClient = check new (asgardeoUrl, {
     auth: {
-        scheme: http:OAUTH2,
-        config: asgardeoAppConfig,
-        scopes: string:split(asgardeoScopesString, " ")
+        clientId: asgardeoAppConfig.clientId,
+        clientSecret: asgardeoAppConfig.clientSecret,
+        tokenEndpoint: asgardeoAppConfig.tokenEndpoint,
+        scopes: asgardeoScopesString
     }
 });
 
-# Creates a new user in the Asgardeo user store. Uses Asgardeo SCIM 2.0 API.
+# Checks the health of the Asgardeo server. Uses Asgardeo SCIM 2.0 API.
 # 
-# + user - Asgardeo User data
-# + return - Created Asgardeo user data if successful, else an `error`
-isolated function createAsgardeoUser(AsgardeoUser user) returns AsgardeoUser|error {
-    // Define the payload for creating a new user
-    json payload = {
-        "schemas": [],
-        "userName": user.userName,
-        "name": {
-            "givenName": user.name.givenName,
-            "familyName": user.name.familyName
-        },
-        "password": user.password,
-        "emails": [
-            {
-                "value": user.email.value,
-                "primary": user.email.primary
-            }
-        ]
-    };
+# + return - `()` if the server is reachable, else an `error`
+isolated function checkAsgardeoHealth() returns error? {
+    http:Response response = check asgardeoClient->/scim2/ServiceProviderConfig.get();
+    if response.statusCode != http:STATUS_OK {
+        return error("Asgardeo server is not reachable.");
+    }
+}
 
-    // Send POST request to create the user
-    http:Response response = check asgardeoClient->/scim2/Users.post(payload);
-
-    if response.statusCode != http:STATUS_CREATED {
-        json|error jsonPayload = response.getJsonPayload();
-        log:printError(string `Error while creating user. ${jsonPayload is json ? jsonPayload.toString() : response.statusCode}`);
-        return error("Error while creating user.");
+# Fetches the user using ID from the Asgardeo user store. Uses Asgardeo SCIM 2.0 API.  
+# Get User by ID - https://wso2.com/asgardeo/docs/apis/scim2/#/operations/getUser%20by%20id
+#
+# + id - User ID
+# + return - Asgardeo user data if the user is found, else an `error`
+isolated function getAsgardeoUser(string id) returns AsgardeoUser|error {
+    AsgardeoGetUserResponse|http:ClientError response = asgardeoClient->/scim2/Users/[id].get();
+    if response is http:ClientError {
+        log:printError(string `Error while fetching user.`, response);
+        return error("Error while fetching user.");
     }
 
-    // Return the created user data
-    json createdUserPayload = check response.getJsonPayload();
+    regexp:Span? findUserName = REGEX_EXTRACT_EMAIL_FROM_USERNAME.find(response.userName);
+    if findUserName is () {
+        return error("User not found");
+    }
+
     return {
-        userName: createdUserPayload.userName.toString(),
-        name: {
-            givenName: createdUserPayload.name.givenName.toString(),
-            familyName: createdUserPayload.name.familyName.toString()
-        },
-        password: user.password, // Password is usually not returned in the response
-        email: {
-            value: createdUserPayload.emails[0].value.toString(),
-            primary: createdUserPayload.emails[0].primary
-        }
+        id: response.id,
+        username: findUserName.substring(),
+        isMigrated: response.urn\:scim\:wso2\:schema.is_migrated.toLowerAscii() == "true"
     };
+}
+
+# Changes the password of the user in the Asgardeo user store. Uses Asgardeo SCIM 2.0 API.  
+# Update User PATCH Endpoint - https://wso2.com/asgardeo/docs/apis/scim2/#/operations/patchUser
+#
+# + user - Asgardeo User data
+# + password - New password
+# + return - `()` if the password was changed successfully, else an `error`
+isolated function changePasswordOfUser(AsgardeoUser user, string password) returns error? {
+    http:Response response = check asgardeoClient->/scim2/Users/[user.id].patch({
+        "schemas": [
+            "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+        ],
+        "Operations": [
+            {
+                "op": "replace",
+                "value": {
+                    "password": password
+                }
+            },
+            {
+                "op": "replace",
+                "value": {
+                    "urn:scim:wso2:schema": {
+                        "is_migrated": "true"
+                    }
+                }
+            }
+        ]
+    });
+
+    if response.statusCode != http:STATUS_OK {
+        json|error jsonPayload = response.getJsonPayload();
+        log:printError(string `Error while changing password. ${jsonPayload is json ?
+            jsonPayload.toString() : response.statusCode}`);
+        return error("Error while changing password.");
+    }
 }
