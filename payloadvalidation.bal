@@ -1,9 +1,9 @@
 import ballerina/http;
 import ballerina/log;
-import ballerina/lang.string;
 
 configurable string asgardeoUrl = ?;
 configurable OAuth2App asgardeoAppConfig = ?;
+final string asgardeoScopesString = string:'join(" ", ASGARDEO_USER_VIEW_SCOPE);
 
 type OAuth2App record {|
     string clientId;
@@ -11,54 +11,38 @@ type OAuth2App record {|
     string tokenEndpoint;
 |};
 
-final string asgardeoScopesString = "internal_user_mgt_create";
+type UserName record {|
+    string givenName;
+    string familyName;
+|};
 
-@display {
-    label: "Asgardeo Client",
-    id: "asgardeo/client"
-}
+type Email record {|
+    string value;
+    boolean primary;
+|};
+
+type AsgardeoUser record {|
+    string userName;
+    UserName name;
+    string password;
+    Email email;
+|};
+
 final http:Client asgardeoClient = check new (asgardeoUrl, {
     auth: {
         scheme: http:OAUTH2,
-        config: {
-            tokenUrl: asgardeoAppConfig.tokenEndpoint,
-            clientId: asgardeoAppConfig.clientId,
-            clientSecret: asgardeoAppConfig.clientSecret,
-            scopes: string:split(asgardeoScopesString, " ")
-        }
+        config: asgardeoAppConfig,
+        scopes: string:split(asgardeoScopesString, " ")
     }
 });
 
-type Email record {
-    string value;
-    boolean primary;
-};
-
-type Name record {
-    string givenName;
-    string familyName;
-};
-
-type UserRequest record {
-    Email email;
-    Name name;
-    string userName;
-    string password;
-};
-
-type AsgardeoUser record {|
-    string id;
-    string userName;
-    boolean isMigrated;
-|};
-
-# Creates a user in the Asgardeo user store. Uses Asgardeo SCIM 2.0 API.
-# Create User - https://wso2.com/asgardeo/docs/apis/scim2/#/operations/createUser
-#
-# + user - User data to be created
+# Creates a new user in the Asgardeo user store. Uses Asgardeo SCIM 2.0 API.
+# 
+# + user - Asgardeo User data
 # + return - Created Asgardeo user data if successful, else an `error`
-isolated function createAsgardeoUser(UserRequest user) returns AsgardeoUser|error {
-    http:Response response = check asgardeoClient->/scim2/Users.post({
+isolated function createAsgardeoUser(AsgardeoUser user) returns AsgardeoUser|error {
+    // Define the payload for creating a new user
+    json payload = {
         "schemas": [],
         "userName": user.userName,
         "name": {
@@ -72,7 +56,10 @@ isolated function createAsgardeoUser(UserRequest user) returns AsgardeoUser|erro
                 "primary": user.email.primary
             }
         ]
-    });
+    };
+
+    // Send POST request to create the user
+    http:Response response = check asgardeoClient->/scim2/Users.post(payload);
 
     if response.statusCode != http:STATUS_CREATED {
         json|error jsonPayload = response.getJsonPayload();
@@ -80,29 +67,18 @@ isolated function createAsgardeoUser(UserRequest user) returns AsgardeoUser|erro
         return error("Error while creating user.");
     }
 
-    json jsonResponse = check response.getJsonPayload();
+    // Return the created user data
+    json createdUserPayload = check response.getJsonPayload();
     return {
-        id: check jsonResponse.id.toString(),
-        userName: check jsonResponse.userName.toString(),
-        isMigrated: check jsonResponse.urn\:scim\:wso2\:schema.is_migrated.toString().toLowerAscii() == "true"
-    };
-}
-
-service / on new http:Listener(8090) {
-    resource function post create(@http:Payload UserRequest req) returns UserRequest|error? {
-        // Log the received request payload for debugging purposes
-        log:printInfo("Received payload: " + req.toJsonString());
-
-        // Create a new user in Asgardeo
-        var userCreationResult = createAsgardeoUser(req);
-
-        if userCreationResult is AsgardeoUser {
-            log:printInfo("User created successfully: " + userCreationResult.toString());
-            // Simply return the received request payload as the response
-            return req;
-        } else {
-            log:printError("Failed to create user: ", userCreationResult);
-            return userCreationResult;
+        userName: createdUserPayload.userName.toString(),
+        name: {
+            givenName: createdUserPayload.name.givenName.toString(),
+            familyName: createdUserPayload.name.familyName.toString()
+        },
+        password: user.password, // Password is usually not returned in the response
+        email: {
+            value: createdUserPayload.emails[0].value.toString(),
+            primary: createdUserPayload.emails[0].primary
         }
-    }
+    };
 }
