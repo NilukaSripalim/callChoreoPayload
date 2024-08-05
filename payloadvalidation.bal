@@ -1,94 +1,146 @@
 import ballerina/http;
-import ballerina/lang.regexp;
 import ballerina/log;
+import ballerina/time;
+import ballerina/cache;
 
+// Configurations
 configurable string asgardeoUrl = ?;
 configurable OAuth2App asgardeoAppConfig = ?;
-final string asgardeoScopesString = "internal_user_mgt_create";
+configurable string redisHost = ?;
+configurable int retryCount = 3;
+configurable int waitTime = 5000; // in milliseconds
 
+// Type definitions
 type OAuth2App record {|
     string clientId;
     string clientSecret;
     string tokenEndpoint;
 |};
 
-@display {
-    label: "Asgardeo Client",
-    id: "asgardeo/client"
-}
+type AsgardeoUser record {|
+    string userName;
+    Name name;
+    string password;
+    Email email;
+|};
+
+type Name record {|
+    string givenName;
+    string familyName;
+|};
+
+type Email record {|
+    string value;
+    boolean primary;
+|};
+
+type AsgardeoGetUserResponse record {|
+    string id;
+    string userName;
+    string urn:scim:wso2:schema.is_migrated;
+|};
+
+// HTTP Client for Asgardeo
 final http:Client asgardeoClient = check new (asgardeoUrl, {
     auth: {
         clientId: asgardeoAppConfig.clientId,
         clientSecret: asgardeoAppConfig.clientSecret,
         tokenEndpoint: asgardeoAppConfig.tokenEndpoint,
-        scopes: asgardeoScopesString
+        scopes: "internal_user_mgt_create"
     }
 });
 
-# Checks the health of the Asgardeo server. Uses Asgardeo SCIM 2.0 API.
-# 
-# + return - `()` if the server is reachable, else an `error`
-isolated function checkAsgardeoHealth() returns error? {
-    http:Response response = check asgardeoClient->/scim2/ServiceProviderConfig.get();
-    if response.statusCode != http:STATUS_OK {
-        return error("Asgardeo server is not reachable.");
-    }
-}
+// Redis connection configuration
+cache:Client conn = check new(redisHost);
 
-# Fetches the user using ID from the Asgardeo user store. Uses Asgardeo SCIM 2.0 API.  
-# Get User by ID - https://wso2.com/asgardeo/docs/apis/scim2/#/operations/getUser%20by%20id
-#
-# + id - User ID
-# + return - Asgardeo user data if the user is found, else an `error`
-isolated function getAsgardeoUser(string id) returns AsgardeoUser|error {
-    AsgardeoGetUserResponse|http:ClientError response = asgardeoClient->/scim2/Users/[id].get();
-    if response is http:ClientError {
-        log:printError(string `Error while fetching user.`, response);
-        return error("Error while fetching user.");
-    }
+isolated function createUserInAsgardeo(json jsonObj, string correlationID) returns json|error? {
+    final string userName = check jsonObj.userName;
+    final json & readonly userobj = <readonly>jsonObj;
 
-    regexp:Span? findUserName = REGEX_EXTRACT_EMAIL_FROM_USERNAME.find(response.userName);
-    if findUserName is () {
-        return error("User not found");
+    // Check cache
+    int|error existResult = conn->exists(["au_".concat(userName)]);
+    if (existResult is error) {
+        log:printError("Error while checking the Redis cache: " + existResult.toString(), correlationID);
+        return error("Cache check failed.");
+    } else if (existResult == 1) {
+        string|error? userIDResponse = conn->get("au_".concat(userName));
+        if (userIDResponse is error) {
+            log:printError("Error while getting cache entry from Redis: " + userIDResponse.toString(), correlationID);
+            return error("Cache retrieval failed.");
+        }
+        log:printInfo("User found in cache: " + <string>userIDResponse, correlationID);
+        return (<string>userIDResponse).fromJsonString();
+    } else {
+        log:printInfo("User not found in cache: " + userName, correlationID);
     }
 
-    return {
-        id: response.id,
-        username: findUserName.substring(),
-        isMigrated: response.urn\:scim\:wso2\:schema.is_migrated.toLowerAscii() == "true"
-    };
-}
+    worker w1 returns json|error? {
+        log:printInfo("Starting user creation process in Asgardeo", correlationID);
+        boolean retryFlow = true;
+        int currentRetryCount = 0;
 
-# Creates a new user in the Asgardeo user store. Uses Asgardeo SCIM 2.0 API.  
-# Create User POST Endpoint - https://wso2.com/asgardeo/docs/apis/scim2/#/operations/createUser
-#
-# + user - Asgardeo User data
-# + return - `()` if the user was created successfully, else an `error`
-isolated function createUser(AsgardeoUser user) returns error? {
-    json userPayload = {
-        "schemas": [
-            "urn:ietf:params:scim:api:messages:2.0:User"
-        ],
-        "userName": user.userName,
-        "name": {
-            "givenName": user.name.givenName,
-            "familyName": user.name.familyName
-        },
-        "password": user.password,
-        "emails": [
-            {
-                "value": user.email.value,
-                "primary": user.email.primary
+        while (retryFlow && currentRetryCount < retryCount) {
+            http:ClientConfiguration httpClientConfig = {
+                httpVersion: "1.1",
+                timeout: 20000
+            };
+
+            log:printInfo("Creating Asgardeo client", correlationID);
+            http:Client httpClient = new (asgardeoUrl, httpClientConfig);
+            
+            // Check if the user already exists
+            http:Response|http:ClientError getResponse = httpClient->get("/scim2/Users?filter=userName+eq+" + userName + "&attributes=id", {"Authorization": "Bearer " + asgardeoAppConfig.clientId});
+            if (getResponse is error) {
+                log:printError("Error while getting the user information from Asgardeo: " + getResponse.toString(), correlationID);
+            } else {
+                json|error getRespPayload = getResponse.getJsonPayload();
+                if (getRespPayload is error) {
+                    log:printError("Error while extracting the JSON response: " + getRespPayload.toString(), correlationID);
+                } else {
+                    int totalResults = check getRespPayload.totalResults;
+                    log:printInfo("Total user results: " + totalResults.toString(), correlationID);
+
+                    if (totalResults == 1) {
+                        json[] resources = check getRespPayload.Resources.ensureType();
+                        json userIdJson = resources[0];
+                        
+                        // Cache the user information
+                        string|error setCacheResponse = conn->pSetEx("au_".concat(userName), userIdJson.toJsonString(), 86400000);
+                        if (setCacheResponse is error) {
+                            log:printError("Error while inserting the entry to Redis cache: " + setCacheResponse.toString(), correlationID);
+                        } else {
+                            retryFlow = false;
+                            log:printInfo("User added to cache successfully.", correlationID);
+                        }
+                    } else {
+                        // Create user if not found
+                        log:printInfo("User not found in Asgardeo, creating new user", correlationID);
+                        time:Utc beforeInvoke = time:utcNow();
+                        
+                        http:Response postResponse = check httpClient->post("/scim2/Users", userobj, {"Authorization": "Bearer " + asgardeoAppConfig.clientId});
+                        json respPayload = check postResponse.getJsonPayload();
+                        log:printInfo("Asgardeo user creation response: " + respPayload.toJsonString(), correlationID);
+                        
+                        time:Utc afterInvoke = time:utcNow();
+                        time:Seconds respondTime = time:utcDiffSeconds(beforeInvoke, afterInvoke);
+                        log:printInfo("Asgardeo User Creation latency: " + respondTime.toString(), correlationID);
+                        
+                        // Cache the newly created user
+                        string|error setCacheResponse = conn->pSetEx("au_".concat(userName), respPayload.toJsonString(), 86400000);
+                        if (setCacheResponse is error) {
+                            log:printError("Error while inserting the entry to Redis cache: " + setCacheResponse.toString(), correlationID);
+                        } else {
+                            retryFlow = false;
+                            log:printInfo("User added to cache successfully after creation.", correlationID);
+                        }
+                    }
+                }
             }
-        ]
-    };
-
-    http:Response response = check asgardeoClient->/scim2/Users.post(userPayload);
-
-    if response.statusCode != http:STATUS_CREATED {
-        json|error jsonPayload = response.getJsonPayload();
-        log:printError(string `Error while creating user. ${jsonPayload is json ?
-            jsonPayload.toString() : response.statusCode}`);
-        return error("Error while creating user.");
+            runtime:sleep(waitTime);
+            currentRetryCount += 1;
+        }
     }
+    
+    log:printInfo("Response for createUserInAsgardeo endpoint: Accepted. Asgardeo user being created", correlationID);
+    return {"status": "Accepted. Asgardeo user being created"};
 }
