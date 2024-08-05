@@ -23,7 +23,7 @@ final http:Client asgardeoClient = check new (asgardeoUrl, {
             tokenUrl: asgardeoAppConfig.tokenEndpoint,
             clientId: asgardeoAppConfig.clientId,
             clientSecret: asgardeoAppConfig.clientSecret,
-            scopes: [asgardeoScopesString]
+            scopes: asgardeoScopesString.split(" ")
         }
     }
 });
@@ -81,9 +81,9 @@ isolated function createAsgardeoUser(UserRequest user) returns AsgardeoUser|erro
 
     json jsonResponse = check response.getJsonPayload();
     return {
-        id: jsonResponse.id.toString(),
-        userName: jsonResponse.userName.toString(),
-        isMigrated: jsonResponse.urn\:scim\:wso2\:schema.is_migrated.toString().toLowerAscii() == "true"
+        id: check jsonResponse.id.toString(),
+        userName: check jsonResponse.userName.toString(),
+        isMigrated: check jsonResponse.urn\:scim\:wso2\:schema.is_migrated.toString().toLowerAscii() == "true"
     };
 }
 
