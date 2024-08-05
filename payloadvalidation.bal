@@ -1,5 +1,6 @@
 import ballerina/http;
 import ballerina/log;
+import ballerina/lang.string;
 
 configurable string asgardeoUrl = ?;
 configurable OAuth2App asgardeoAppConfig = ?;
@@ -23,7 +24,7 @@ final http:Client asgardeoClient = check new (asgardeoUrl, {
             tokenUrl: asgardeoAppConfig.tokenEndpoint,
             clientId: asgardeoAppConfig.clientId,
             clientSecret: asgardeoAppConfig.clientSecret,
-            scopes: asgardeoScopesString.split(" ")
+            scopes: string:split(asgardeoScopesString, " ")
         }
     }
 });
